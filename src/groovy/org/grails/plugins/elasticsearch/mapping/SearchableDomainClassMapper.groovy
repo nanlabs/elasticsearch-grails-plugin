@@ -144,7 +144,11 @@ class SearchableDomainClassMapper extends GroovyObjectSupport {
         // Populate default settings.
         // Clean out any per-property specs not allowed by 'only', 'except' rules.
 
+        def transientProperties = customMappedProperties.findAll{String propertyName, SearchableClassPropertyMapping mapping->
+            mapping.specialMappingAttributes.transient == true
+        }
         customMappedProperties.keySet().retainAll(mappableProperties)
+        customMappedProperties = customMappedProperties + transientProperties
         mappableProperties.remove(grailsDomainClass.getIdentifier().getName())
 
         for (String propertyName : mappableProperties) {

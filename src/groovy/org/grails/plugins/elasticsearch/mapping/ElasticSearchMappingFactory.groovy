@@ -43,8 +43,8 @@ class ElasticSearchMappingFactory {
         }
     }
 
-    static Map<String, Object> getElasticMapping(SearchableClassMapping scm) {
-        Map mappingFields = [properties: getMappingProperties(scm)]
+    static Map<String, Object> getElasticMapping(SearchableClassMapping scm,int currentDepth=0) {
+        Map mappingFields = [properties: getMappingProperties(scm,currentDepth)]
 
         SearchableClassPropertyMapping parentProperty = scm.propertiesMapping.find { it.parent }
         if (parentProperty) {
@@ -56,7 +56,7 @@ class ElasticSearchMappingFactory {
         mapping
     }
 
-    private static Map<String, Object> getMappingProperties(SearchableClassMapping scm) {
+    private static Map<String, Object> getMappingProperties(SearchableClassMapping scm, int currentDepth = 0) {
         Map<String, Object> elasticTypeMappingProperties = [:]
 
         if (!scm.isAll()) {
@@ -116,8 +116,9 @@ class ElasticSearchMappingFactory {
                     // todo limit depth to avoid endless recursion?
                     propType = 'object'
                     //noinspection unchecked
+                    if (!scpm.maxDepth || currentDepth<scpm.maxDepth)
                     propOptions.putAll((Map<String, Object>)
-                            (getElasticMapping(scpm.getComponentPropertyMapping()).values().iterator().next()))
+                            (getElasticMapping(scpm.getComponentPropertyMapping(),currentDepth+1).values().iterator().next()))
                 }
 
                 // Once it is an object, we need to add id & class mappings, otherwise
