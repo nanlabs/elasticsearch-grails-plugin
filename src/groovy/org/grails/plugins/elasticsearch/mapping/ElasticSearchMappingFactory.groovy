@@ -17,6 +17,7 @@ package org.grails.plugins.elasticsearch.mapping
 
 import grails.util.GrailsNameUtils
 import grails.util.Holders
+import org.apache.commons.lang.StringUtils
 import org.codehaus.groovy.grails.commons.GrailsClassUtils
 import org.codehaus.groovy.grails.commons.GrailsDomainClass
 import org.codehaus.groovy.grails.commons.GrailsDomainClassProperty
@@ -46,6 +47,12 @@ class ElasticSearchMappingFactory {
     static Map<String, Object> getElasticMapping(SearchableClassMapping scm,int currentDepth=0) {
         Map mappingFields = [properties: getMappingProperties(scm,currentDepth)]
 
+        if (scm.@all instanceof Map) {
+            mappingFields.'_all' = scm.@all
+        }
+        if (!scm.isAll())
+            mappingFields.'_all' = Collections.singletonMap('enabled', false)
+
         SearchableClassPropertyMapping parentProperty = scm.propertiesMapping.find { it.parent }
         if (parentProperty) {
             mappingFields.'_parent' = [type: GrailsNameUtils.getPropertyName(parentProperty.grailsProperty.type)]
@@ -59,62 +66,17 @@ class ElasticSearchMappingFactory {
     private static Map<String, Object> getMappingProperties(SearchableClassMapping scm, int currentDepth = 0) {
         Map<String, Object> elasticTypeMappingProperties = [:]
 
-        if (!scm.isAll()) {
-            elasticTypeMappingProperties.'_all' = Collections.singletonMap('enabled', false)
-        }
-
         // Map each domain properties in supported format, or object for complex type
         scm.getPropertiesMapping().each { SearchableClassPropertyMapping scpm ->
             // Does it have custom mapping?
-            def grailsProperty = scpm.getGrailsProperty()
-            String propType = grailsProperty.getTypePropertyName()
             Map<String, Object> propOptions = [:]
             // Add the custom mapping (searchable static property in domain model)
             propOptions.putAll(scpm.getAttributes())
-            if (scpm.isGeoPoint()) {
-                propType = 'geo_point'
-            } else if (!(SUPPORTED_FORMAT.contains(propType))) {
-                // Handle embedded persistent collections, ie List<String> listOfThings
-                def referencedPropertyType = grailsProperty.getReferencedPropertyType()
-                if (grailsProperty.isBasicCollectionType()) {
-                    String basicType = ClassUtils.getShortName(referencedPropertyType).toLowerCase(Locale.ENGLISH)
-                    if (SUPPORTED_FORMAT.contains(basicType)) {
-                        propType = basicType
-                    }
-                    // Handle arrays
-                } else if (referencedPropertyType.isArray()) {
-                    String basicType = ClassUtils.getShortName(referencedPropertyType.getComponentType()).toLowerCase(Locale.ENGLISH)
-                    if (SUPPORTED_FORMAT.contains(basicType)) {
-                        propType = basicType
-                    }
-                } else if (isDateType(referencedPropertyType)) {
-                    propType = 'date'
-                } else if (GrailsClassUtils.isJdk5Enum(referencedPropertyType)) {
-                    propType = 'string'
-                } else if (scpm.getConverter() != null) {
-                    // Use 'string' type for properties with custom converter.
-                    // Arrays are automatically resolved by ElasticSearch, so no worries.
-                    def requestedConverter = scpm.getConverter()
-                    propType = (SUPPORTED_FORMAT.contains(requestedConverter)) ? requestedConverter : 'string'
-                    // Handle primitive types, see https://github.com/mstein/elasticsearch-grails-plugin/issues/61
-                } else if (referencedPropertyType.isPrimitive()) {
-                    if (javaPrimitivesToElastic.containsKey(referencedPropertyType.toString())) {
-                        propType = javaPrimitivesToElastic.get(referencedPropertyType.toString())
-                    } else {
-                        propType = 'object'
-                    }
-                } else if (isBigDecimalType(referencedPropertyType)) {
-                    propType = 'double'
-                } else {
-                    propType = 'object'
-                }
-
-                if (scpm.getReference() != null) {
-                    propType = 'object'      // fixme: think about composite ids.
-                } else if (scpm.isComponent()) {
+            String propType = getElasticType(scpm)
+            if (!scpm.isGeoPoint()) {
+                if (scpm.isComponent()) {
                     // Proceed with nested mapping.
                     // todo limit depth to avoid endless recursion?
-                    propType = 'object'
                     //noinspection unchecked
                     if (!scpm.maxDepth || currentDepth<scpm.maxDepth)
                     propOptions.putAll((Map<String, Object>)
@@ -129,7 +91,7 @@ class ElasticSearchMappingFactory {
                         props = [:]
                         propOptions.properties = props
                     }
-                    GrailsDomainClass referencedDomainClass = grailsProperty.getReferencedDomainClass()
+                    GrailsDomainClass referencedDomainClass = scpm.grailsProperty.getReferencedDomainClass()
                     GrailsDomainClassProperty idProperty = referencedDomainClass.getPropertyByName('id')
                     String idType = idProperty.getTypePropertyName()
 
@@ -173,15 +135,85 @@ class ElasticSearchMappingFactory {
         elasticTypeMappingProperties
     }
 
+    private static String getElasticType(SearchableClassPropertyMapping scpm) {
+        String propType = null
+
+        if (scpm.isGeoPoint()) {
+            propType = 'geo_point'
+        } else {
+            propType = scpm.grailsProperty.getTypePropertyName()
+
+            //Preprocess collections and arrays to work with it's element types
+            Class referencedPropertyType = scpm.grailsProperty.getReferencedPropertyType()
+            if(Collection.isAssignableFrom(referencedPropertyType) || referencedPropertyType.isArray()) {
+                //Handle collections explictly mapped (needed for dealing with transients)
+                if (scpm.grailsProperty.domainClass.associationMap[scpm.grailsProperty.name]) {
+                    referencedPropertyType = scpm.grailsProperty.domainClass.associationMap[scpm.grailsProperty.name]
+                }
+                if (referencedPropertyType.isArray()) {
+                    referencedPropertyType = referencedPropertyType.getComponentType()
+                }
+                String basicType = getTypeSimpleName(referencedPropertyType)
+                if (SUPPORTED_FORMAT.contains(basicType)) {
+                    propType = basicType
+                }
+            } else if (!SUPPORTED_FORMAT.contains(propType) && SUPPORTED_FORMAT.contains(getTypeSimpleName(referencedPropertyType))) {
+                propType = getTypeSimpleName(referencedPropertyType)
+            }
+
+            //Handle unsupported types
+            if (!(SUPPORTED_FORMAT.contains(propType))) {
+                if (isDateType(referencedPropertyType)) {
+                    propType = 'date'
+                } else if (referencedPropertyType.isEnum()) {
+                    propType = 'string'
+                } else if (scpm.getConverter() != null) {
+                    // Use 'string' type for properties with custom converter.
+                    // Arrays are automatically resolved by ElasticSearch, so no worries.
+                    def requestedConverter = scpm.getConverter()
+                    propType = (SUPPORTED_FORMAT.contains(requestedConverter)) ? requestedConverter : 'string'
+                    // Handle primitive types, see https://github.com/mstein/elasticsearch-grails-plugin/issues/61
+                } else if (referencedPropertyType.isPrimitive()) {
+                    if (javaPrimitivesToElastic.containsKey(referencedPropertyType.toString())) {
+                        propType = javaPrimitivesToElastic.get(referencedPropertyType.toString())
+                    } else {
+                        propType = 'object'
+                    }
+                } else if (isBigDecimalType(referencedPropertyType)) {
+                    propType = 'double'
+                } else {
+                    propType = 'object'
+                }
+
+                if (scpm.getReference() != null) {
+                    propType = 'object'      // fixme: think about composite ids.
+                } else if (scpm.isComponent()) {
+                    // Proceed with nested mapping.
+                    // todo limit depth to avoid endless recursion?
+                    propType = 'object'
+                }
+            }
+        }
+
+        propType
+    }
+
+    private static String getTypeSimpleName(Class type){
+        ClassUtils.getShortName(type).toLowerCase(Locale.ENGLISH)
+    }
+
     private static boolean idTypeIsMongoObjectId(String idType) {
         idType.equals('objectId')
     }
 
     private static String treatValueAsAString(String idType) {
-        def pluginManager = Holders.applicationContext.getBean(GrailsPluginManager.BEAN_NAME)
-
-        if (((GrailsPluginManager) pluginManager).hasGrailsPlugin('mongodb')) {
-            return 'string'
+        if (Holders.grailsApplication.config.elasticSearch.datastoreImpl =~ /mongo/) {
+            idType = 'string'
+        } else {
+            def pluginManager = Holders.applicationContext.getBean(GrailsPluginManager.BEAN_NAME)
+            if (((GrailsPluginManager) pluginManager).hasGrailsPlugin('mongodb')) {
+                idType = 'string'
+            }
         }
         idType
     }

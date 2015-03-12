@@ -17,7 +17,6 @@
 package org.grails.plugins.elasticsearch.mapping
 
 import grails.util.GrailsNameUtils
-
 import org.codehaus.groovy.grails.commons.GrailsDomainClass
 import org.grails.plugins.elasticsearch.ElasticSearchContextHolder
 
@@ -29,11 +28,17 @@ class SearchableClassMapping {
     private GrailsDomainClass domainClass
     /** Searchable root? */
     private boolean root = true
-    private boolean all = true
+    protected all = true
+
+    public static final READ_SUFFIX = "_read"
+    public static final WRITE_SUFFIX = "_write"
+
+    String indexName
 
     SearchableClassMapping(GrailsDomainClass domainClass, Collection<SearchableClassPropertyMapping> propertiesMapping) {
         this.domainClass = domainClass
         this.propertiesMapping = propertiesMapping
+        this.indexName = calculateIndexName()
     }
 
     SearchableClassPropertyMapping getPropertyMapping(String propertyName) {
@@ -51,6 +56,11 @@ class SearchableClassMapping {
 
     void setRoot(Boolean root) {
         this.root = root != null && root
+    }
+
+    void setAll(all) {
+        if (all != null)
+            this.all = all
     }
 
     Collection<SearchableClassPropertyMapping> getPropertiesMapping() {
@@ -71,16 +81,21 @@ class SearchableClassMapping {
         }
     }
 
-    /**
-     * @return ElasticSearch index name
-     */
-    String getIndexName() {
-        String name = domainClass.grailsApplication.config.elasticSearch.index.name ?: domainClass.packageName
+    String calculateIndexName() {
+        String name = domainClass.grailsApplication?.config?.elasticSearch?.index?.name ?: domainClass.packageName
         if (name == null || name.length() == 0) {
             // index name must be lowercase (org.elasticsearch.indices.InvalidIndexNameException)
             name = domainClass.getPropertyName()
         }
         return name.toLowerCase()
+    }
+
+    String getIndexingIndex() {
+        return indexName + WRITE_SUFFIX
+    }
+
+    String getQueryingIndex() {
+        return indexName + READ_SUFFIX
     }
 
     /**
@@ -91,6 +106,17 @@ class SearchableClassMapping {
     }
 
     boolean isAll() {
-        return all
+        if (all instanceof Boolean) {
+            return all
+        } else if (all instanceof Map) {
+            return all.enabled instanceof Boolean ? all.enabled : true
+        }
+        return true
     }
+
+    @Override
+    public String toString() {
+        return "${getClass().name}(domainClass:$domainClass, propertiesMapping:$propertiesMapping, indexName:$indexName, isAll:${isAll()})"
+    }
+
 }

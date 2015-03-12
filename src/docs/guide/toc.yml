@@ -16,12 +16,15 @@ mapping:
     title: Searchable Component-Reference
     searchableReference: Searchable Reference
     searchableComponent: Searchable Component
+  mappingMigrations: Mapping Migrations
 indexing: Indexing
 searching:
   title: Searching
   queryStrings: Query Strings
   queryClosure: Query Closure
+  queryBuilder: Query QueryBuilder
   filterClosure: Filter Closure
+  filterBuilder: Filter FilterBuilder
   highlighting: Highlighting
   sorting:
     title: Sorting

@@ -1,8 +1,13 @@
 package org.grails.plugins.elasticsearch
 
 import grails.test.spock.IntegrationSpec
+import grails.util.GrailsNameUtils
+import org.codehaus.groovy.grails.commons.DefaultGrailsDomainClass
+import org.codehaus.groovy.grails.commons.GrailsApplication
+import org.codehaus.groovy.grails.commons.GrailsDomainClass
 import org.codehaus.groovy.grails.web.json.JSONObject
 import org.elasticsearch.action.admin.cluster.state.ClusterStateRequestBuilder
+import org.elasticsearch.action.get.GetRequest
 import org.elasticsearch.client.AdminClient
 import org.elasticsearch.client.ClusterAdminClient
 import org.elasticsearch.cluster.ClusterState
@@ -10,10 +15,12 @@ import org.elasticsearch.cluster.metadata.IndexMetaData
 import org.elasticsearch.cluster.metadata.MappingMetaData
 import org.elasticsearch.common.unit.DistanceUnit
 import org.elasticsearch.index.query.QueryBuilders
+import org.elasticsearch.index.query.QueryBuilder
+import org.elasticsearch.index.query.FilterBuilder
+import org.elasticsearch.index.query.FilterBuilders
 import org.elasticsearch.search.sort.FieldSortBuilder
 import org.elasticsearch.search.sort.SortBuilders
 import org.elasticsearch.search.sort.SortOrder
-import spock.lang.IgnoreRest
 import test.*
 
 class ElasticSearchServiceIntegrationSpec extends IntegrationSpec {
@@ -21,6 +28,7 @@ class ElasticSearchServiceIntegrationSpec extends IntegrationSpec {
     ElasticSearchService elasticSearchService
     ElasticSearchAdminService elasticSearchAdminService
     ElasticSearchHelper elasticSearchHelper
+    GrailsApplication grailsApplication
 
     /*
      * This test class doesn't delete any ElasticSearch indices, because that would also delete the mapping.
@@ -47,13 +55,6 @@ class ElasticSearchServiceIntegrationSpec extends IntegrationSpec {
         ].each {
             def geoPoint = new GeoPoint(lat: it.lat, lon: it.lon).save(failOnError: true)
             new Building(name: "postalCode${it.name}", location: geoPoint).save(failOnError: true)
-        }
-    }
-
-    def cleanupSpec() {
-        def dataFolder = new File('data')
-        if (dataFolder.isDirectory()) {
-            dataFolder.delete()
         }
     }
 
@@ -224,9 +225,11 @@ class ElasticSearchServiceIntegrationSpec extends IntegrationSpec {
     }
 
     private MappingMetaData getFieldMappingMetaData(String indexName, String typeName) {
+        if (elasticSearchAdminService.aliasExists(indexName)) {
+            indexName = elasticSearchAdminService.indexPointedBy(indexName)
+        }
         AdminClient admin = elasticSearchHelper.elasticSearchClient.admin()
         ClusterAdminClient cluster = admin.cluster()
-
         ClusterStateRequestBuilder indices = cluster.prepareState().setIndices(indexName)
         ClusterState clusterState = indices.execute().actionGet().state
         IndexMetaData indexMetaData = clusterState.metaData.index(indexName)
@@ -295,6 +298,28 @@ class ElasticSearchServiceIntegrationSpec extends IntegrationSpec {
         List<Product> searchResults = result.searchResults
         searchResults[0].name == wurmProduct.name
     }
+	
+	void 'searching with a FilterBuilder filter and a Closure query'(){
+        when: 'searching for a price'
+		FilterBuilder filter = FilterBuilders.rangeFilter("price").gte(1.99).lte(2.3)
+        def result = elasticSearchService.search(null as Closure, filter)
+
+        then: "the result should be product 'wurm'"
+        result.total == 1
+        List<Product> searchResults = result.searchResults
+        searchResults[0].name == "wurm"
+	}
+	
+	void 'searching with a FilterBuilder filter and a QueryBuilder query'(){
+		when: 'searching for a price'
+		FilterBuilder filter = FilterBuilders.rangeFilter("price").gte(1.99).lte(2.3)
+        def result = elasticSearchService.search(null as QueryBuilder, filter)
+
+        then: "the result should be product 'wurm'"
+        result.total == 1
+        List<Product> searchResults = result.searchResults
+        searchResults[0].name == "wurm"
+	}
 
     void 'searching with wildcards in query at first position'() {
         when: 'search with asterisk at first position'
@@ -550,10 +575,9 @@ class ElasticSearchServiceIntegrationSpec extends IntegrationSpec {
         result.sort.(searchResults[0].id) == [2.5382648464733575]
     }
 
-    @IgnoreRest
     void 'Component as an inner object'() {
         given:
-        def mal = new Person(name: 'Malcolm Reynolds').save(flush: true)
+        def mal = new Person(firstName: 'Malcolm', lastName: 'Reynolds').save(flush: true)
         def spaceship = new Spaceship(name: 'Serenity', captain: mal).save(flush: true)
         elasticSearchService.index(spaceship)
         elasticSearchAdminService.refresh()
@@ -566,6 +590,52 @@ class ElasticSearchServiceIntegrationSpec extends IntegrationSpec {
 
         def result = search.searchResults.first()
         result.name == 'Serenity'
-        result.captain.name == 'Malcolm Reynolds'
+        result.captain.firstName == 'Malcolm'
+        result.captain.lastName == 'Reynolds'
+    }
+
+    void 'bulk test'() {
+        given:
+        (1..1858).each {
+            def person = new Person(firstName: 'Person', lastName: 'McNumbery'+it).save(flush: true)
+            def spaceShip = new Spaceship(name: 'Ship-' + it, captain: person).save(flush: true)
+            println "Created ${it} domains"
+        }
+
+        when:
+        elasticSearchService.index(Spaceship)
+        elasticSearchAdminService.refresh(Spaceship)
+
+        then:
+        findFailures().size() == 0
+        elasticSearchService.countHits('Ship\\-') == 1858
+    }
+
+    private def findFailures() {
+        def domainClass = new DefaultGrailsDomainClass(Spaceship)
+        def failures=[]
+        def allObjects = Spaceship.list()
+        allObjects.each {
+            elasticSearchHelper.withElasticSearch { client ->
+                GetRequest getRequest = new GetRequest(getIndexName(domainClass), getTypeName(domainClass), it.id.toString());
+                def result = client.get(getRequest).actionGet()
+                if (!result.isExists()) {
+                    failures << it
+                }
+            }
+        }
+        failures
+    }
+
+    private String getIndexName(GrailsDomainClass domainClass) {
+        String name = grailsApplication.config.elasticSearch.index.name ?: domainClass.packageName
+        if (name == null || name.length() == 0) {
+            name = domainClass.getPropertyName()
+        }
+        return name.toLowerCase()
+    }
+
+    private String getTypeName(GrailsDomainClass domainClass) {
+        GrailsNameUtils.getPropertyName(domainClass.clazz)
     }
 }

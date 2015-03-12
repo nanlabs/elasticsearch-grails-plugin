@@ -26,6 +26,7 @@ import org.elasticsearch.common.xcontent.XContentBuilder
 import org.elasticsearch.search.SearchHit
 import org.elasticsearch.search.SearchHits
 import org.grails.plugins.elasticsearch.ElasticSearchContextHolder
+import org.grails.plugins.elasticsearch.exception.MappingException
 import org.grails.plugins.elasticsearch.mapping.SearchableClassMapping
 import org.grails.plugins.elasticsearch.mapping.SearchableClassPropertyMapping
 import org.slf4j.Logger
@@ -43,13 +44,13 @@ class DomainClassUnmarshaller {
 
     private static final Logger LOG = LoggerFactory.getLogger(this)
 
-    private TypeConverter typeConverter = new SimpleTypeConverter()
     private ElasticSearchContextHolder elasticSearchContextHolder
     private GrailsApplication grailsApplication
     private Client elasticSearchClient
 
     Collection buildResults(SearchHits hits) {
         DefaultUnmarshallingContext unmarshallingContext = new DefaultUnmarshallingContext()
+        TypeConverter typeConverter = new SimpleTypeConverter()
         List results = []
         for (SearchHit hit : hits) {
             String type = hit.type()
@@ -83,8 +84,10 @@ class DomainClassUnmarshaller {
                     def unmarshalledProperty = unmarshallProperty(scm.domainClass, key, entry.value, unmarshallingContext)
                     rebuiltProperties[key] = unmarshalledProperty
                     populateCyclicReference(instance, rebuiltProperties, unmarshallingContext)
+                } catch (MappingException e) {
+                    LOG.debug("Error unmarshalling property '$key' of Class ${scm.domainClass.name} with id $id", e)
                 } catch (Throwable t) {
-                    LOG.error("Error unmarshalling Class ${scm.domainClass.name} with id $id", t)
+                    LOG.error("Error unmarshalling property '$key' of Class ${scm.domainClass.name} with id $id", t)
                 } finally {
                     unmarshallingContext.resetContext()
                 }
@@ -160,7 +163,7 @@ class DomainClassUnmarshaller {
         SearchableClassPropertyMapping scpm = elasticSearchContextHolder.getMappingContext(domainClass).getPropertyMapping(propertyName)
         Object parseResult
         if (null == scpm) {
-            // TODO: unhandled property exists in index
+            throw new MappingException("Property ${domainClass.name}.${propertyName} found in index, but is not defined as searchable.")
         }
         if (null != scpm && propertyValue instanceof Map) {
 
@@ -248,8 +251,9 @@ class DomainClassUnmarshaller {
     private unmarshallReference(GrailsDomainClass domainClass, Map<String, Object> data, DefaultUnmarshallingContext unmarshallingContext) {
         // As a simplest scenario recover object directly from ElasticSearch.
         // todo add first-level caching and cycle ref checking
-        String indexName = elasticSearchContextHolder.getMappingContext(domainClass).indexName
+        String indexName = elasticSearchContextHolder.getMappingContext(domainClass).queryingIndex
         String name = elasticSearchContextHolder.getMappingContext(domainClass).elasticTypeName
+        TypeConverter typeConverter = new SimpleTypeConverter()
         // A property value is expected to be a map in the form [id:ident]
         Object id = data.id
         GetRequest request = new GetRequest(indexName).operationThreaded(false).type(name)
@@ -265,15 +269,21 @@ class DomainClassUnmarshaller {
 
     private unmarshallDomain(GrailsDomainClass domainClass, providedId, Map<String, Object> data, DefaultUnmarshallingContext unmarshallingContext) {
         GrailsDomainClassProperty identifier = domainClass.identifier
+        TypeConverter typeConverter = new SimpleTypeConverter()
         Object id = typeConverter.convertIfNecessary(providedId, identifier.type)
         GroovyObject instance = (GroovyObject) domainClass.newInstance()
         instance.setProperty(identifier.name, id)
         for (Map.Entry<String, Object> entry : data.entrySet()) {
             if (entry.key != 'class' && entry.key != 'id') {
-                unmarshallingContext.unmarshallingStack.push(entry.key)
-                Object propertyValue = unmarshallProperty(domainClass, entry.key, entry.value, unmarshallingContext)
-                new DatabindingApi().setProperties(instance, Collections.singletonMap(entry.key, propertyValue))
-                unmarshallingContext.unmarshallingStack.pop()
+                try {
+                    unmarshallingContext.unmarshallingStack.push(entry.key)
+                    Object propertyValue = unmarshallProperty(domainClass, entry.key, entry.value, unmarshallingContext)
+                    new DatabindingApi().setProperties(instance, Collections.singletonMap(entry.key, propertyValue))
+                } catch(MappingException e) {
+                    LOG.debug("Error unmarshalling property '${entry.key}', value= ${entry.value}", e)
+                } finally {
+                    unmarshallingContext.unmarshallingStack.pop()
+                }
             }
         }
         instance
